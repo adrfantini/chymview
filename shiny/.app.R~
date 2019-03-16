@@ -1,0 +1,426 @@
+#This file complies with Shyny single-file apps guidelines:
+#http://shiny.rstudio.com/articles/single-file.html
+#loadinput module for chymview
+#See chymview.R for details
+#Contains:
+# UI definition
+# Server definition
+# Shinyapp
+
+# This file is part of CHyMview.
+#
+# CHyMview is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# CHyMview is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with CHyMview.  If not, see http://www.gnu.org/licenses/.
+
+{### UI definition
+ui <- navbarPage("CHyMview", id="nav",
+#Inspired by:
+#https://github.com/rstudio/shiny-examples/tree/master/063-superzip-example
+    {tabPanel("Explore",
+        div(class="outer",
+            tags$head(# Include our custom CSS, this is NECESSARY to have height="100%"
+                #See https://stackoverflow.com/questions/31278938/how-can-i-make-my-shiny-leafletoutput-have-height-100-while-inside-a-navbarpa
+                includeCSS("www/styles.css")
+            ),
+            leafletOutput("map", width="100%", height="100%")
+        )
+
+    )},
+    {tabPanel("Map",
+        fluidPage(
+            sidebarLayout(
+                sidebarPanel(
+                    selectInput(inputId="var",
+                        "Variable",
+                        c(dvarnames, paste(svarnames, "(static)")), #See how curvar() splits varnames
+                        width="100%"
+                    ),
+                    uiOutput("uitime"),
+                    sliderInput(inputId="var_range",
+                        label="Data range",
+                        min=varSum[1,1],
+                        max=varSum[5,1],
+                        value=varSum[c(1,5),1],
+                        step=rangestep[names(varSum)[1]],
+                        width="100%",
+                        ticks=FALSE,
+                        sep=""
+                    ),
+                    fluidRow(
+                        column(4, align="right", numericInput(inputId="min_range", value=NULL, label=NULL, width="100%")),
+                        column(4, align="bottom", actionButton(inputId="set_range", label="Set range", width="100%")),
+                        column(4, align="left", numericInput(inputId="max_range", value=NULL, label=NULL, width="100%"))
+                    ),
+                    fluidRow(
+                    column(6,
+                    checkboxInput(inputId="oob_checkbox",
+                        label="Remove out of range",
+                        value = TRUE,
+                        width = "100%"
+                    )), column(6,
+                    checkboxInput(inputId="add_river_checkbox",
+                        label="Overlay rivers",
+                        value = TRUE,
+                        width = "100%"
+                    ))),
+                    tableOutput(outputId="click_table"),
+                    h5("Selected area statistics (no selection = global)"),
+                    div(style = 'overflow-x: scroll', tableOutput(outputId="brush_table_summ")) #might be wide, add scrollbar
+                ),
+                mainPanel(
+                    plotOutput("varMap",
+                        width="100%",
+                        height=varMap_height,
+                        click="varMap_click",
+                        dblclick="varMap_click2",
+                        hover=hoverOpts(id="varMap_hover",
+                            delayType=delayType_hover,
+                            delay=200,
+                            clip=TRUE
+                        )
+                    )
+                )
+            )
+        )
+    )},
+    {tabPanel("Graphs",
+        verticalLayout(
+            h5("Timeseries for selected (dynamic) variable and point(s)"),
+            plotlyOutput(outputId = "ts1", height="300px"),
+            h5("Downriver values plot for selected timestep, variable and point(s)"),
+            plotlyOutput(outputId = "ts2", height="300px")
+        )
+    )},
+    {tabPanel("Metadata",
+        tabsetPanel(
+            tabPanel("File information",
+                div(style = 'overflow-x: scroll',
+                    tableOutput(outputId="file_table")
+                )
+            ),
+            tabPanel("Global attributes",
+                tableOutput(outputId="globAtt_table")
+            ),
+            tabPanel("Current variable attributes",
+                tableOutput(outputId="varAtt_table")
+            )
+        )
+    )},
+    tabPanel("Credits",
+        verbatimTextOutput(outputId="credits_text")
+    )
+)
+}
+
+
+server <- function(input, output, session) {### Server definition
+
+session$onSessionEnded(function() {
+    stopApp()
+    quit(ask="no")
+  })
+
+source("addMouseCoordinates.R")
+# source("addLogo.R")
+
+#     observe({input$map_zoom #This was a test, the input$zoom value actually only gets a value when the leaflet map is rendered
+#         cat(input$map_zoom)
+#         if (is.null(inpu$map_zoom)) return()
+#
+#     })
+
+    {#Common functions
+    xyClick <- reactive({aclick <- input$varMap_click; v1 <- curvar(); t1 <- curtim()
+        if (is.null(aclick)) {
+            return(list(x=NA, y=NA, Lon=NA, Lat=NA, celln=NA, val=NA, xr=NA, yr=NA, Lonr=NA, Latr=NA, cellnr=NA, valr=NA))
+        } else {
+            #Find closest river cell
+            near <- nearPoints(validRiverCoords, aclick, "lon", "lat", threshold=10, maxpoints=1, addDist=TRUE)
+            #Find exact point cell
+            x <- aclick$x
+            y <- aclick$y
+            celln <- cellFromXY(river, c(x, y))
+            rc <- rowColFromCell(river, celln)
+            #Find values
+            vals <- if(v1 %in% svarnames) {
+                static[[v1]][c(celln, near$celln)]
+            } else {
+                dynData[[v1]][[t1]][c(celln, near$celln)]
+            }
+            return(list(x=rc[2], y=rc[1], Lon=x, Lat=y, celln=celln, val=vals[1], xr=near$col, yr=near$row, Lonr=near$lon, Latr=near$lat, cellnr=near$celln, valr=vals[2]))
+        }
+    })
+    xyClick2 <- reactive({aclick <- input$varMap_click2; v1 <- curvar(); t1 <- curtim()
+        if (is.null(aclick)) {
+            return(list(x=NA, y=NA, Lon=NA, Lat=NA, celln=NA, val=NA, xr=NA, yr=NA, Lonr=NA, Latr=NA, cellnr=NA, valr=NA))
+        } else {
+            #Find closest river cell
+            near <- nearPoints(validRiverCoords, aclick, "lon", "lat", threshold=10, maxpoints=1, addDist=TRUE)
+            #Find exact point cell
+            x <- aclick$x
+            y <- aclick$y
+            celln <- cellFromXY(river, c(x, y))
+            rc <- rowColFromCell(river, celln)
+            #Find values
+            vals <- if(v1 %in% svarnames) {
+                static[[v1]][c(celln, near$celln)]
+            } else {
+                dynData[[v1]][[t1]][c(celln, near$celln)]
+            }
+            return(list(x=rc[2], y=rc[1], Lon=x, Lat=y, celln=celln, val=vals[1], xr=near$col, yr=near$row, Lonr=near$lon, Latr=near$lat, cellnr=near$celln, valr=vals[2]))
+        }
+    })
+    xyHover <- reactive({ahover <- input$varMap_hover; v1 <- curvar(); t1 <- curtim()
+        if (is.null(ahover)) {
+            return(list(x=NA, y=NA, Lon=NA, Lat=NA, celln=NA, val=NA))
+        } else {
+            #Find exact point cell
+            x <- ahover$x
+            y <- ahover$y
+            celln <- cellFromXY(river, c(x, y))
+            rc <- rowColFromCell(river, celln)
+            #Find value
+            val <- if(v1 %in% svarnames) {
+                static[[v1]][celln]
+            } else {
+                dynData[[v1]][[t1]][celln]
+            }
+            return(list(x=rc[2], y=rc[1], Lon=x, Lat=y, celln=celln, val=val))
+        }
+    })
+    }
+
+    {#Explore tab
+    output$map <- renderLeaflet({
+        map <- leaflet()
+        for (i in 1:length(tiles)) {
+            map <- map %>%
+            addProviderTiles(tiles[i], group=tiles[i], providerTileOptions(zIndex=-100, continuousWorld=FALSE))
+        }
+        cat("Prerendering map...\n")
+        map <- map %>%
+            addLayersControl(position ="topleft", baseGroups = tiles, overlayGroups = c("CHyM domain", "CHyM rivers", if (addBasins) {"CHyM basins"} else {NULL})) %>%
+    #         mapview::addMouseCoordinates(style="basic") %>%
+    #         addGraticule(interval=10) %>%
+            addMiniMap(toggleDisplay = TRUE, zoomAnimation=TRUE, tiles=minimapTiles) %>%
+            addScaleBar(position="bottomleft") %>%
+            addMouseCoordinates(style="basic") %>%
+            addRectangles(ext[1], ext[3], ext[2], ext[4], fill=FALSE, color=showExtentColor, opacity=1, group="CHyM domain", dashArray="5, 10") %>%
+            addMeasure(position="bottomleft", primaryLengthUnit = "kilometers", primaryAreaUnit = "sqmeters", localization="en")# %>%
+#             addLogo(img="www/ictplogo.gif", src="local", url="http://www.ictp.it", width=380, height=104, position="topright") %>%
+#             addLogo(img="www/chymlogo.gif", src="local", url="http://www.ictp.it", width=195, height=104, position="topright", offset.x=-390)
+        map <- map %>%
+            addPolygons(
+                group="CHyM rivers",
+                data=riverpolys,
+                color=map_rivercolor,
+                stroke=FALSE,
+                smoothFactor=0,
+                fillOpacity=0.4,
+                label=validRiverLabels,
+                labelOptions = labelOptions(
+                    style = list("font-weight" = "normal", padding = "3px 8px"),
+                    textsize = "15px",
+                    direction = "auto"
+                ),
+                highlightOptions=highlightOptions(
+                    fillOpacity = 1,
+                    bringToFront=TRUE
+                )
+            )
+        if (addBasins) { map <- map %>%
+            addPolygons(
+                group="CHyM basins",
+                data=basinpolys,
+                color=map_basincolor,
+                stroke=FALSE,
+                smoothFactor=1,
+                fillOpacity=0.2
+            )
+        }
+        if (restrictMap) {
+            map <- map %>% setMaxBounds(ext[1], ext[3], ext[2], ext[4])
+        }
+        cat("Rendering map...\n")
+        map
+    })
+    }
+
+    {#Map tab
+    output$uitime <- renderUI({#Trick to have a slider with values you chose, from: https://groups.google.com/forum/#!topic/shiny-discuss/AeAzR4p2h1g
+        args       <- list(inputId="tstep", label="Time", ticks=times, value=times[1])
+        args$min   <- 1
+        args$max   <- length(args$ticks)
+        ticks <- paste0(args$ticks, collapse=',')
+        args$ticks <- FALSE
+        html  <- do.call('sliderInput', args)
+        html$children[[2]]$attribs[['data-values']] <- ticks;
+        html
+    })
+
+    resetSlider <- function(v) { #Function to reset the slider
+        thisstep <- rangestep[v]
+        if (is.null(thisstep) || is.na(thisstep)) {
+            #Step becomes 1/100 of IQR
+            thisstep <- (varSum[4,v]-varSum[2,v])/100
+        }
+        updateSliderInput(session, inputId="var_range",
+            min=varSum[1,v],
+            max=varSum[5,v],
+            value=varSum[c(1,5),v],
+            step=step
+        )
+    }
+
+    observe({# Observer to reset slider when variable is changed
+        v <- curvar()
+        resetSlider(v)
+        updateNumericInput(session, "min_range", value=NA)
+        updateNumericInput(session, "max_range", value=NA)
+    })
+
+    curvar <- reactive({#Currently selected variable
+        if (is.null(input$var)) {
+            strsplit(dvarnames[1], " ")[[1]][1]
+        } else {
+            strsplit(input$var, " ")[[1]][1]
+        }
+    })
+    curtim <- reactive({ #Currently selected timestep
+        if (is.null(input$tstep)) {
+            1
+        } else {
+            input$tstep+1
+        }
+    })
+
+    curbounds <- reactive({bounds <- input$map_bounds
+        if (is.null(bounds)) return(NULL)
+        xmin <- max(ext[1], bounds$west)
+        xmax <- min(ext[2], bounds$east)
+        ymin <- max(ext[3], bounds$south)
+        ymax <- min(ext[4], bounds$north)
+        list(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
+    })
+
+    output$varMap <- renderPlot({ #Render ggplot when variable or range change
+        v <- isolate(curvar())
+        if (v %in% svarnames) {
+            df <- static_ggplot[[v]]
+        } else {
+            df <- cellCoords
+            df$val <- values(dynData[[v]][[curtim()]])
+        }
+        plotTitle <- paste0(varAtt[[curvar()]]$long_name, " (", varAtt[[curvar()]]$units, ")")
+        ggvarMap(input$oob_checkbox, df, input$var_range, input$add_river_checkbox, curbounds(), plotTitle)
+    })
+
+    #Observer to set the input range on clicking the SET button
+    observeEvent(input$set_range, {
+        m <- input$min_range
+        M <- input$max_range
+        if (is.na(m)) m <- input$var_range[1]
+        if (is.na(M)) M <- input$var_range[2]
+#         if (is.na(m) & is.na(M)) {
+#             m <-
+#             M <-
+#         }
+        updateSliderInput(session, "var_range",
+            value=c(m, M),
+            min=min(m, input$var_range[1]),
+            max=max(M, input$var_range[2])
+        )
+    })
+
+    output$click_table <- renderTable({
+        c1 <- xyClick()[ c("yr", "xr", "Latr", "Lonr", "valr")]
+        c2 <- xyClick2()[c("yr", "xr", "Latr", "Lonr", "valr")]
+        hov <- xyHover()[c("y",  "x",  "Lat",  "Lon",  "val" )]
+        df <- data.frame(Click=as.numeric(c1), Dblclick=as.numeric(c2), Hover=as.numeric(hov))
+        rownames(df) <- c("i", "j", "Latitude", "Longitude", "Value")
+        df
+        }, rownames=TRUE)
+
+    summTable <- function(bounds, v, t) {
+        if (is.null(bounds)) {
+            t(varSum[v])
+        } else {
+            pext <- unlist(bounds)
+            if(v %in% svarnames) {
+                t(summary(crop(static[[v]], pext)))
+            } else {
+                t(summary(crop(dynData[[v]][[t]], pext)))
+            }
+        }
+    }
+
+    output$brush_table_summ <- renderTable(summTable(curbounds(), curvar(), curtim()))
+    }
+
+    {#Graphs tab
+        output$ts1 <- renderPlotly(ggplotly(ggplot_timeseries(curvar(), xyClick(), xyClick2())) %>% layout(hovermode="x"))
+
+        output$ts2 <- renderPlotly(ggplotly(ggplot_downstream(curvar(), curtim(), xyClick(), xyClick2())) %>% layout(hovermode="x"))
+    }
+
+    {#Metadata tab
+    globals <- t(as.data.frame(globAtt))
+    colnames(globals) <- "Global attributes"
+    output$globAtt_table <- renderTable(globals, rownames=TRUE)
+    dffile <- data.frame(
+        'Name(static)'=normalizePath(paste0("../", fin_s)),
+        'Size(static)'=paste0(round(file.size(normalizePath(paste0("../", fin_s)))/(1024**2), 2), "MB"),
+        'Name(dynamic)'=filename(dynData[[1]]),
+        'Size(dynamic)'=paste0(round(file.size(filename(dynData[[1]]))/(1024**2), 2), "MB"),
+        Nrow=nrow(river),
+        Ncol=ncol(river),
+        Ncell=ncell(river),
+        Xrange=paste(round(ext[1], 2), "-", round(ext[2], 2)),
+        Yrange=paste(round(ext[3], 2), "-", round(ext[4], 2)),
+        resX=res(river)[1],
+        resY=res(river)[2],
+        Proj=projection(river)
+    )
+    output$file_table <- renderTable(t(dffile), rownames=TRUE, colnames=FALSE)
+
+    #Attribute table
+    output$varAtt_table <- renderTable(as.data.frame(varAtt[[curvar()]]))
+    }
+
+    {#Credits tab
+    output$credits_text <- renderText(paste0(
+        "CHyMview version ",prog_version," (",prog_date,") from Adriano Fantini
+Made possible by Leaflet, Mapview, Shiny, Raster, Optparse, Dplyr, ggplot2 and many more R packages: see 'startup.R' to see them all!
+
+Please submit bug reports and feature requests to afantini@ictp.it
+
+
+
+# CHyMview is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# CHyMview is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with CHyMview.  If not, see http://www.gnu.org/licenses/."))
+    }
+}
+
+
+### Shinyapp
+shinyApp(ui, server)
