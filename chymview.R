@@ -70,7 +70,7 @@ cat("Reading configuration file...\n")
 source("config.R")
 
 cat("Setting path...\n")
-.libPaths(c("/home/netapp-clima-users1/afantini/R/x86_64-pc-linux-gnu-library/3.2", .libPaths())) #Load the library path which contains the necessary packages. You can skip this step (by commenting it) and install the packages yourself. See module "startup" to see which packages this program uses. This works only if you are within the ICTP network!!!
+.libPaths(c("/home/netapp-clima-users1/afantini/R/x86_64-pc-linux-gnu-library/3.5", .libPaths())) #Load the library path which contains the necessary packages. You can skip this step (by commenting it) and install the packages yourself. See module "startup" to see which packages this program uses. This works only if you are within the ICTP network!!!
 
 cat("Performing startup tasks...\n")
 source("startup.R")
